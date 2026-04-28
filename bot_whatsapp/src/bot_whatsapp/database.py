@@ -20,6 +20,7 @@ def init_db() -> None:
                 fecha DATE NOT NULL UNIQUE,
                 poll_message_id TEXT,
                 lista_message_id TEXT,
+                message_secret BLOB,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -32,21 +33,37 @@ def init_db() -> None:
                 UNIQUE(partido_id, player_jid)
             );
         """)
+        try:
+            conn.execute("ALTER TABLE partidos ADD COLUMN message_secret BLOB")
+        except Exception:
+            pass
 
 
-def upsert_partido(fecha: date, poll_message_id: str | None = None) -> int:
+def upsert_partido(fecha: date, poll_message_id: str | None = None, message_secret: bytes | None = None) -> int:
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO partidos (fecha, poll_message_id)
-            VALUES (?, ?)
+            INSERT INTO partidos (fecha, poll_message_id, message_secret)
+            VALUES (?, ?, ?)
             ON CONFLICT(fecha) DO UPDATE SET
-                poll_message_id = COALESCE(excluded.poll_message_id, poll_message_id)
+                poll_message_id = COALESCE(excluded.poll_message_id, poll_message_id),
+                message_secret = COALESCE(excluded.message_secret, message_secret)
             """,
-            (fecha.isoformat(), poll_message_id),
+            (fecha.isoformat(), poll_message_id, message_secret),
         )
         row = conn.execute("SELECT id FROM partidos WHERE fecha = ?", (fecha.isoformat(),)).fetchone()
         return row["id"]
+
+
+def get_message_secret(poll_message_id: str) -> bytes | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT message_secret FROM partidos WHERE poll_message_id = ?",
+            (poll_message_id,),
+        ).fetchone()
+    if row and row["message_secret"]:
+        return bytes(row["message_secret"])
+    return None
 
 
 def set_lista_message_id(partido_id: int, message_id: str) -> None:
@@ -88,6 +105,13 @@ def get_partido_by_poll_id(poll_message_id: str) -> sqlite3.Row | None:
         return conn.execute(
             "SELECT * FROM partidos WHERE poll_message_id = ?",
             (poll_message_id,),
+        ).fetchone()
+
+
+def get_latest_partido() -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM partidos ORDER BY fecha DESC LIMIT 1"
         ).fetchone()
 
 
