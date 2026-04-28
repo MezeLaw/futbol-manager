@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "FutBOT",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}
