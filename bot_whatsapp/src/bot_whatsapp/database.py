@@ -28,15 +28,20 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 partido_id INTEGER NOT NULL REFERENCES partidos(id),
                 player_jid TEXT NOT NULL,
+                player_name TEXT,
                 respuesta TEXT NOT NULL CHECK(respuesta IN ('SI', 'NO')),
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(partido_id, player_jid)
             );
         """)
-        try:
-            conn.execute("ALTER TABLE partidos ADD COLUMN message_secret BLOB")
-        except Exception:
-            pass
+        for migration in [
+            "ALTER TABLE partidos ADD COLUMN message_secret BLOB",
+            "ALTER TABLE votos ADD COLUMN player_name TEXT",
+        ]:
+            try:
+                conn.execute(migration)
+            except Exception:
+                pass
 
 
 def upsert_partido(fecha: date, poll_message_id: str | None = None, message_secret: bytes | None = None) -> int:
@@ -74,29 +79,32 @@ def set_lista_message_id(partido_id: int, message_id: str) -> None:
         )
 
 
-def upsert_voto(partido_id: int, player_jid: str, respuesta: str) -> None:
+def upsert_voto(partido_id: int, player_jid: str, respuesta: str, player_name: str | None = None) -> None:
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO votos (partido_id, player_jid, respuesta)
-            VALUES (?, ?, ?)
+            INSERT INTO votos (partido_id, player_jid, player_name, respuesta)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(partido_id, player_jid) DO UPDATE SET
+                player_name = COALESCE(excluded.player_name, player_name),
                 respuesta = excluded.respuesta,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (partido_id, player_jid, respuesta),
+            (partido_id, player_jid, player_name, respuesta),
         )
 
 
-def get_votos(partido_id: int) -> dict[str, list[str]]:
+def get_votos(partido_id: int) -> dict[str, list[tuple[str, str]]]:
+    """Retorna votos ordenados por updated_at. Cada entry es (jid, nombre)."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT player_jid, respuesta FROM votos WHERE partido_id = ?",
+            "SELECT player_jid, player_name, respuesta FROM votos WHERE partido_id = ? ORDER BY updated_at",
             (partido_id,),
         ).fetchall()
-    result: dict[str, list[str]] = {"SI": [], "NO": []}
+    result: dict[str, list[tuple[str, str]]] = {"SI": [], "NO": []}
     for row in rows:
-        result[row["respuesta"]].append(row["player_jid"])
+        name = row["player_name"] or row["player_jid"].split("@")[0]
+        result[row["respuesta"]].append((row["player_jid"], name))
     return result
 
 

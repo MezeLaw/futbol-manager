@@ -16,16 +16,29 @@ REOPEN_PLAYERS = int(os.environ.get("REOPEN_PLAYERS", "12"))
 POLL_OPTIONS = ["SI", "NO"]
 
 
-def _build_lista(votos: dict[str, list[str]]) -> str:
+def _build_lista(votos: dict[str, list[tuple[str, str]]], fecha_partido: date) -> str:
     si = votos["SI"]
     no = votos["NO"]
-    lines = [f"*Confirmados ({len(si)}):*"]
-    for i, jid in enumerate(si, 1):
-        lines.append(f"  {i}. {jid.split('@')[0]}")
+    confirmados = si[:REOPEN_PLAYERS]
+    suplentes = si[REOPEN_PLAYERS:]
+
+    dia = fecha_partido.strftime("%A %d/%m").capitalize()
+    lines = [f"*La Masia {dia}:*\n"]
+
+    lines.append(f"*Confirmados ({len(confirmados)}/{REOPEN_PLAYERS}):*")
+    for i, (_, name) in enumerate(confirmados, 1):
+        lines.append(f"  {i}. {name}")
+
+    if suplentes:
+        lines.append(f"\n*Suplentes ({len(suplentes)}):*")
+        for i, (_, name) in enumerate(suplentes, 1):
+            lines.append(f"  {i}. {name}")
+
     if no:
         lines.append(f"\n*No pueden ({len(no)}):*")
-        for jid in no:
-            lines.append(f"  - {jid.split('@')[0]}")
+        for _, name in no:
+            lines.append(f"  - {name}")
+
     return "\n".join(lines)
 
 
@@ -143,7 +156,8 @@ def _handle_command(msg: dict) -> None:
             client.send_text(remote_jid, "No hay partido registrado.")
             return
         votos = database.get_votos(partido["id"])
-        client.send_text(remote_jid, _build_lista(votos))
+        fecha = date.fromisoformat(partido["fecha"])
+        client.send_text(remote_jid, _build_lista(votos, fecha))
     elif text == "!cerrar":
         client.set_group_announcement(remote_jid, announcement=True)
         log.info("Grupo cerrado por comando manual")
@@ -194,8 +208,9 @@ def _handle_poll_vote(msg: dict) -> None:
 
     partido_id = partido["id"]
     fecha_partido = date.fromisoformat(partido["fecha"])
-    database.upsert_voto(partido_id, voter_jid, respuesta)
-    log.info("Voto registrado: %s → %s", voter_jid, respuesta)
+    player_name = msg.get("pushName") or None
+    database.upsert_voto(partido_id, voter_jid, respuesta, player_name)
+    log.info("Voto registrado: %s (%s) → %s", voter_jid, player_name, respuesta)
 
     _refresh_lista(partido_id, fecha_partido, partido["lista_message_id"])
 
@@ -252,7 +267,7 @@ def handle_webhook(payload: dict) -> None:
 
 def _refresh_lista(partido_id: int, fecha_partido: date, lista_message_id: str | None) -> None:
     votos = database.get_votos(partido_id)
-    texto = _build_lista(votos)
+    texto = _build_lista(votos, fecha_partido)
 
     if lista_message_id:
         try:

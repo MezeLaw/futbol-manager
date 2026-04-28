@@ -45,7 +45,7 @@ async def listar_partidos():
     result = []
     for p in partidos:
         votos = database.get_votos(p["id"])
-        result.append({"fecha": p["fecha"], "confirmados": len(votos["SI"])})
+        result.append({"fecha": p["fecha"], "confirmados": len(votos["SI"]), "suplentes": max(0, len(votos["SI"]) - 12)})
     return result
 
 
