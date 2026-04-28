@@ -19,11 +19,9 @@ def send_poll(group_jid: str, question: str, options: list[str]) -> str:
     """Envía una poll nativa al grupo. Retorna el message_id."""
     payload = {
         "number": group_jid,
-        "pollMessage": {
-            "name": question,
-            "selectableCount": 1,
-            "values": options,
-        },
+        "name": question,
+        "selectableCount": 1,
+        "values": options,
     }
     with _client() as c:
         r = c.post(f"/message/sendPoll/{INSTANCE}", json=payload)
