@@ -35,7 +35,7 @@ def send_encuesta(fecha_partido: date) -> None:
     """Pone el grupo en announcement y envía la poll. Guarda IDs en DB."""
     database.init_db()
     dia = fecha_partido.strftime("%A %d/%m").capitalize()
-    question = f"¿Jugás el {dia}?"
+    question = f"¿Jugás el {dia} en La Masia?"
 
     client.set_group_announcement(GROUP_JID, announcement=True)
 
