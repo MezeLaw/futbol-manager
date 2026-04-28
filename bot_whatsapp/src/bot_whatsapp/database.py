@@ -108,6 +108,14 @@ def get_votos(partido_id: int) -> dict[str, list[tuple[str, str]]]:
     return result
 
 
+def get_partido_by_id(partido_id: int) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM partidos WHERE id = ?",
+            (partido_id,),
+        ).fetchone()
+
+
 def get_partido_by_poll_id(poll_message_id: str) -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(

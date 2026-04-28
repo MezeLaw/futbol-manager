@@ -2,6 +2,8 @@ import os
 import hmac as _hmac
 import hashlib
 import logging
+import random
+import threading
 from datetime import date, timedelta
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -212,7 +214,7 @@ def _handle_poll_vote(msg: dict) -> None:
     database.upsert_voto(partido_id, voter_jid, respuesta, player_name)
     log.info("Voto registrado: %s (%s) → %s", voter_jid, player_name, respuesta)
 
-    _refresh_lista(partido_id, fecha_partido, partido["lista_message_id"])
+    _schedule_refresh(partido_id, fecha_partido)
 
 
 def _as_list(data) -> list:
@@ -262,10 +264,32 @@ def handle_webhook(payload: dict) -> None:
             database.upsert_voto(partido_id, player_jid, respuesta)
             log.info("Voto registrado: %s → %s", player_jid, respuesta)
 
-        _refresh_lista(partido_id, fecha_partido, partido["lista_message_id"])
+        _schedule_refresh(partido_id, fecha_partido)
 
 
-def _refresh_lista(partido_id: int, fecha_partido: date, lista_message_id: str | None) -> None:
+_timers: dict[int, threading.Timer] = {}
+_timers_lock = threading.Lock()
+
+
+def _schedule_refresh(partido_id: int, fecha_partido: date) -> None:
+    delay = random.uniform(10, 20)
+    with _timers_lock:
+        existing = _timers.get(partido_id)
+        if existing:
+            existing.cancel()
+        t = threading.Timer(delay, _refresh_lista, args=[partido_id, fecha_partido])
+        _timers[partido_id] = t
+        t.start()
+    log.info("Refresh programado en %.1fs para partido %d", delay, partido_id)
+
+
+def _refresh_lista(partido_id: int, fecha_partido: date) -> None:
+    with _timers_lock:
+        _timers.pop(partido_id, None)
+
+    partido = database.get_partido_by_id(partido_id)
+    lista_message_id = partido["lista_message_id"] if partido else None
+
     votos = database.get_votos(partido_id)
     texto = _build_lista(votos, fecha_partido)
 
