@@ -1,0 +1,33 @@
+meta {
+  name: Enviar encuesta
+  type: http
+  seq: 1
+}
+
+post {
+  url: http://localhost:8080/message/sendPoll/futbol-bot
+  body: json
+  auth: inherit
+}
+
+headers {
+  apikey: changeme_api_key
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "number": "120363424243236999@g.us",
+    "name": "¿Jugamos el jueves?",
+    "selectableCount": 1,
+    "values": [
+      "Si voy",
+      "No puedo",
+      "Tal vez"
+    ]
+  }
+}
+
+settings {
+  encodeUrl: false
+}
