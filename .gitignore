@@ -1,0 +1,7 @@
+.idea
+__pycache__/
+*.py[cod]
+.env
+data/
+.DS_Store
+*.postman_collection.json
