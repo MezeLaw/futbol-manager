@@ -15,8 +15,8 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, headers=_HEADERS, timeout=30)
 
 
-def send_poll(group_jid: str, question: str, options: list[str]) -> str:
-    """Envía una poll nativa al grupo. Retorna el message_id."""
+def send_poll(group_jid: str, question: str, options: list[str]) -> tuple[str, bytes]:
+    """Envía una poll nativa al grupo. Retorna (message_id, message_secret)."""
     payload = {
         "number": group_jid,
         "name": question,
@@ -27,7 +27,10 @@ def send_poll(group_jid: str, question: str, options: list[str]) -> str:
         r = c.post(f"/message/sendPoll/{INSTANCE}", json=payload)
         r.raise_for_status()
         data = r.json()
-    return data["key"]["id"]
+    poll_id = data["key"]["id"]
+    secret_dict = data.get("message", {}).get("messageContextInfo", {}).get("messageSecret", {})
+    message_secret = bytes([secret_dict[str(i)] for i in range(len(secret_dict))])
+    return poll_id, message_secret
 
 
 def send_text(group_jid: str, text: str) -> str:
@@ -44,16 +47,19 @@ def delete_message(group_jid: str, message_id: str) -> None:
     """Elimina un mensaje enviado por el bot."""
     payload = {"id": message_id, "remoteJid": group_jid, "fromMe": True}
     with _client() as c:
-        r = c.delete(f"/chat/deleteMessageForEveryone/{INSTANCE}", json=payload)
+        r = c.request("DELETE", f"/chat/deleteMessageForEveryone/{INSTANCE}", json=payload)
         r.raise_for_status()
 
 
 def set_group_announcement(group_jid: str, announcement: bool) -> None:
     """Cambia el modo del grupo: announcement=True → solo admins escriben."""
     setting = "announcement" if announcement else "not_announcement"
-    payload = {"groupJid": group_jid, "action": setting}
     with _client() as c:
-        r = c.patch(f"/group/updateSetting/{INSTANCE}", json=payload)
+        r = c.post(
+            f"/group/updateSetting/{INSTANCE}",
+            params={"groupJid": group_jid},
+            json={"action": setting},
+        )
         r.raise_for_status()
 
 

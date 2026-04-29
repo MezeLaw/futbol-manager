@@ -40,12 +40,12 @@ async def webhook(request: Request):
 
 @app.get("/partidos")
 async def listar_partidos():
-    from . import database
     partidos = database.get_partidos()
     result = []
     for p in partidos:
-        votos = database.get_votos(p["id"])
-        result.append({"fecha": p["fecha"], "confirmados": len(votos["SI"])})
+        si = database.get_votos_si(p["id"])
+        titulares = p["titulares"] or 12
+        result.append({"fecha": p["fecha"], "confirmados": len(si[:titulares]), "suplentes": len(si[titulares:])})
     return result
 
 
