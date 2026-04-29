@@ -17,10 +17,12 @@ def init_db() -> None:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS partidos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fecha DATE NOT NULL UNIQUE,
+                fecha DATE NOT NULL,
                 poll_message_id TEXT,
                 lista_message_id TEXT,
                 message_secret BLOB,
+                titulares INTEGER,
+                question TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -30,34 +32,50 @@ def init_db() -> None:
                 player_jid TEXT NOT NULL,
                 player_name TEXT,
                 respuesta TEXT NOT NULL CHECK(respuesta IN ('SI', 'NO')),
+                last_si_at TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(partido_id, player_jid)
             );
         """)
-        for migration in [
-            "ALTER TABLE partidos ADD COLUMN message_secret BLOB",
-            "ALTER TABLE votos ADD COLUMN player_name TEXT",
-        ]:
-            try:
-                conn.execute(migration)
-            except Exception:
-                pass
+
+        # Migración: eliminar UNIQUE en partidos.fecha (esquema viejo)
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='partidos'"
+        ).fetchone()
+        if row and "fecha DATE NOT NULL UNIQUE" in (row["sql"] or ""):
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(partidos)").fetchall()]
+            col_list = ", ".join(
+                c for c in ["id", "fecha", "poll_message_id", "lista_message_id",
+                             "message_secret", "titulares", "question", "created_at"]
+                if c in cols
+            )
+            conn.executescript(f"""
+                CREATE TABLE partidos_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha DATE NOT NULL,
+                    poll_message_id TEXT,
+                    lista_message_id TEXT,
+                    message_secret BLOB,
+                    titulares INTEGER,
+                    question TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO partidos_new ({col_list}) SELECT {col_list} FROM partidos;
+                DROP TABLE partidos;
+                ALTER TABLE partidos_new RENAME TO partidos;
+            """)
 
 
-def upsert_partido(fecha: date, poll_message_id: str | None = None, message_secret: bytes | None = None) -> int:
+def insert_partido(fecha: date, poll_message_id: str, message_secret: bytes, titulares: int, question: str) -> int:
     with get_conn() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
-            INSERT INTO partidos (fecha, poll_message_id, message_secret)
-            VALUES (?, ?, ?)
-            ON CONFLICT(fecha) DO UPDATE SET
-                poll_message_id = COALESCE(excluded.poll_message_id, poll_message_id),
-                message_secret = COALESCE(excluded.message_secret, message_secret)
+            INSERT INTO partidos (fecha, poll_message_id, message_secret, titulares, question)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (fecha.isoformat(), poll_message_id, message_secret),
+            (fecha.isoformat(), poll_message_id, message_secret, titulares, question),
         )
-        row = conn.execute("SELECT id FROM partidos WHERE fecha = ?", (fecha.isoformat(),)).fetchone()
-        return row["id"]
+        return cursor.lastrowid
 
 
 def get_message_secret(poll_message_id: str) -> bytes | None:
@@ -83,29 +101,44 @@ def upsert_voto(partido_id: int, player_jid: str, respuesta: str, player_name: s
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO votos (partido_id, player_jid, player_name, respuesta)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO votos (partido_id, player_jid, player_name, respuesta, last_si_at)
+            VALUES (?, ?, ?, ?, CASE WHEN ? = 'SI' THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(partido_id, player_jid) DO UPDATE SET
                 player_name = COALESCE(excluded.player_name, player_name),
                 respuesta = excluded.respuesta,
+                last_si_at = CASE WHEN excluded.respuesta = 'SI' THEN CURRENT_TIMESTAMP ELSE last_si_at END,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (partido_id, player_jid, player_name, respuesta),
+            (partido_id, player_jid, player_name, respuesta, respuesta),
         )
 
 
-def get_votos(partido_id: int) -> dict[str, list[tuple[str, str]]]:
-    """Retorna votos ordenados por updated_at. Cada entry es (jid, nombre)."""
+def get_votos_si(partido_id: int) -> list[tuple[str, str]]:
+    """Retorna lista de (jid, nombre) de quienes votaron SI, ordenados por last_si_at."""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT player_jid, player_name, respuesta FROM votos WHERE partido_id = ? ORDER BY updated_at",
+            """
+            SELECT player_jid, player_name FROM votos
+            WHERE partido_id = ? AND respuesta = 'SI'
+            ORDER BY last_si_at
+            """,
             (partido_id,),
         ).fetchall()
-    result: dict[str, list[tuple[str, str]]] = {"SI": [], "NO": []}
-    for row in rows:
-        name = row["player_name"] or row["player_jid"].split("@")[0]
-        result[row["respuesta"]].append((row["player_jid"], name))
-    return result
+    return [(r["player_jid"], r["player_name"] or r["player_jid"].split("@")[0]) for r in rows]
+
+
+def get_votos_no(partido_id: int) -> list[tuple[str, str]]:
+    """Retorna lista de (jid, nombre) de quienes votaron NO."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT player_jid, player_name FROM votos
+            WHERE partido_id = ? AND respuesta = 'NO'
+            ORDER BY updated_at
+            """,
+            (partido_id,),
+        ).fetchall()
+    return [(r["player_jid"], r["player_name"] or r["player_jid"].split("@")[0]) for r in rows]
 
 
 def get_partido_by_id(partido_id: int) -> sqlite3.Row | None:
@@ -127,12 +160,12 @@ def get_partido_by_poll_id(poll_message_id: str) -> sqlite3.Row | None:
 def get_latest_partido() -> sqlite3.Row | None:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM partidos ORDER BY fecha DESC LIMIT 1"
+            "SELECT * FROM partidos ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
 
 def get_partidos() -> list[sqlite3.Row]:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM partidos ORDER BY fecha DESC LIMIT 10"
+            "SELECT * FROM partidos ORDER BY id DESC LIMIT 10"
         ).fetchall()

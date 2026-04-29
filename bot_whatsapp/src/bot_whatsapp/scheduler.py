@@ -12,17 +12,17 @@ TZ = os.environ.get("TZ", "America/Argentina/Buenos_Aires")
 
 
 def _encuesta_lunes() -> None:
-    # Lunes 14:00 → partido el miércoles
+    # Lunes 14:00 → partido el miércoles 21hs
     fecha = date.today() + timedelta(days=2)
     log.info("Scheduler: enviando encuesta para el %s", fecha)
-    handlers.send_encuesta(fecha)
+    handlers.send_encuesta(fecha, horario="21")
 
 
 def _encuesta_viernes() -> None:
-    # Viernes 14:00 → partido el domingo
+    # Viernes 14:00 → partido el domingo 20hs
     fecha = date.today() + timedelta(days=2)
     log.info("Scheduler: enviando encuesta para el %s", fecha)
-    handlers.send_encuesta(fecha)
+    handlers.send_encuesta(fecha, horario="20")
 
 
 def start_scheduler() -> BackgroundScheduler:

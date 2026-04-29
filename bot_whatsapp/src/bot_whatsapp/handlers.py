@@ -4,7 +4,7 @@ import hashlib
 import logging
 import random
 import threading
-from datetime import date, timedelta
+from datetime import date
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -16,18 +16,16 @@ GROUP_JID = os.environ["GROUP_JID"]
 REOPEN_MODE = os.environ.get("REOPEN_MODE", "players")
 REOPEN_PLAYERS = int(os.environ.get("REOPEN_PLAYERS", "12"))
 POLL_OPTIONS = ["SI", "NO"]
+_DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 
-def _build_lista(votos: dict[str, list[tuple[str, str]]], fecha_partido: date) -> str:
-    si = votos["SI"]
-    no = votos["NO"]
-    confirmados = si[:REOPEN_PLAYERS]
-    suplentes = si[REOPEN_PLAYERS:]
+def _build_lista(si: list[tuple[str, str]], no: list[tuple[str, str]], titulares: int = REOPEN_PLAYERS, question: str = "") -> str:
+    confirmados = si[:titulares]
+    suplentes = si[titulares:]
 
-    dia = fecha_partido.strftime("%A %d/%m").capitalize()
-    lines = [f"*La Masia {dia}:*\n"]
+    lines = [f"*{question}*\n"]
 
-    lines.append(f"*Confirmados ({len(confirmados)}/{REOPEN_PLAYERS}):*")
+    lines.append(f"*Confirmados ({len(confirmados)}/{titulares}):*")
     for i, (_, name) in enumerate(confirmados, 1):
         lines.append(f"  {i}. {name}")
 
@@ -37,7 +35,7 @@ def _build_lista(votos: dict[str, list[tuple[str, str]]], fecha_partido: date) -
             lines.append(f"  {i}. {name}")
 
     if no:
-        lines.append(f"\n*No pueden ({len(no)}):*")
+        lines.append(f"\n*NO 🏳️‍🌈 ({len(no)}):*")
         for _, name in no:
             lines.append(f"  - {name}")
 
@@ -109,17 +107,19 @@ def _decrypt_poll_vote(
     return None
 
 
-def send_encuesta(fecha_partido: date) -> None:
+def send_encuesta(fecha_partido: date, question: str | None = None, titulares: int | None = None, horario: str | None = None) -> None:
     """Pone el grupo en announcement y envía la poll. Guarda IDs en DB."""
-    database.init_db()
-    dia = fecha_partido.strftime("%A %d/%m").capitalize()
-    question = f"¿Jugás el {dia} en La Masia?"
+    if question is None:
+        dia = f"{_DIAS[fecha_partido.weekday()]} {fecha_partido.strftime('%d/%m')}"
+        hora_part = f" a las {horario}hs" if horario else ""
+        question = f"¿Jugás el {dia}{hora_part} en La Masia?"
+    _titulares = titulares if titulares is not None else REOPEN_PLAYERS
 
     client.set_group_announcement(GROUP_JID, announcement=True)
 
     poll_id, message_secret = client.send_poll(GROUP_JID, question, POLL_OPTIONS)
-    partido_id = database.upsert_partido(fecha_partido, poll_message_id=poll_id, message_secret=message_secret)
-    log.info("Encuesta enviada. partido_id=%s poll_id=%s", partido_id, poll_id)
+    partido_id = database.insert_partido(fecha_partido, poll_id, message_secret, _titulares, question)
+    log.info("Encuesta enviada. partido_id=%s poll_id=%s titulares=%s", partido_id, poll_id, _titulares)
 
 
 def _get_message_text(msg: dict) -> str:
@@ -139,7 +139,8 @@ def _handle_command(msg: dict) -> None:
     if not remote_jid.endswith("@g.us"):
         return
 
-    text = _get_message_text(msg).lower()
+    raw_text = _get_message_text(msg)
+    text = raw_text.lower()
     if not text.startswith("!"):
         return
 
@@ -149,17 +150,26 @@ def _handle_command(msg: dict) -> None:
     except Exception as e:
         log.warning("No se pudo borrar comando %s: %s", text, e)
 
-    if text == "!votacion":
-        fecha = date.today() + timedelta(days=2)
-        send_encuesta(fecha)
+    if text.startswith("!votacion"):
+        args = raw_text[len("!votacion"):].strip()
+        question = None
+        titulares = None
+        if args:
+            parts = [p.strip() for p in args.split("|")]
+            question = parts[0] or None
+            if len(parts) > 1 and parts[1].isdigit():
+                titulares = int(parts[1])
+        send_encuesta(date.today(), question=question, titulares=titulares)
     elif text == "!lista":
         partido = database.get_latest_partido()
         if not partido:
             client.send_text(remote_jid, "No hay partido registrado.")
             return
-        votos = database.get_votos(partido["id"])
-        fecha = date.fromisoformat(partido["fecha"])
-        client.send_text(remote_jid, _build_lista(votos, fecha))
+        si = database.get_votos_si(partido["id"])
+        no = database.get_votos_no(partido["id"])
+        titulares = partido["titulares"] or REOPEN_PLAYERS
+        question = partido["question"] or ""
+        client.send_text(remote_jid, _build_lista(si, no, titulares, question))
     elif text == "!cerrar":
         client.set_group_announcement(remote_jid, announcement=True)
         log.info("Grupo cerrado por comando manual")
@@ -208,13 +218,11 @@ def _handle_poll_vote(msg: dict) -> None:
         log.warning("Poll desconocida: %s", poll_id)
         return
 
-    partido_id = partido["id"]
-    fecha_partido = date.fromisoformat(partido["fecha"])
     player_name = msg.get("pushName") or None
-    database.upsert_voto(partido_id, voter_jid, respuesta, player_name)
+    database.upsert_voto(partido["id"], voter_jid, respuesta, player_name)
     log.info("Voto registrado: %s (%s) → %s", voter_jid, player_name, respuesta)
 
-    _schedule_refresh(partido_id, fecha_partido)
+    _schedule_refresh(partido["id"])
 
 
 def _as_list(data) -> list:
@@ -253,7 +261,6 @@ def handle_webhook(payload: dict) -> None:
             continue
 
         partido_id = partido["id"]
-        fecha_partido = date.fromisoformat(partido["fecha"])
 
         for vote_event in poll_updates:
             player_jid = vote_event.get("pollUpdateMessageKey", {}).get("participant", "")
@@ -264,34 +271,37 @@ def handle_webhook(payload: dict) -> None:
             database.upsert_voto(partido_id, player_jid, respuesta)
             log.info("Voto registrado: %s → %s", player_jid, respuesta)
 
-        _schedule_refresh(partido_id, fecha_partido)
+        _schedule_refresh(partido_id)
 
 
 _timers: dict[int, threading.Timer] = {}
 _timers_lock = threading.Lock()
 
 
-def _schedule_refresh(partido_id: int, fecha_partido: date) -> None:
+def _schedule_refresh(partido_id: int) -> None:
     delay = random.uniform(10, 20)
     with _timers_lock:
         existing = _timers.get(partido_id)
         if existing:
             existing.cancel()
-        t = threading.Timer(delay, _refresh_lista, args=[partido_id, fecha_partido])
+        t = threading.Timer(delay, _refresh_lista, args=[partido_id])
         _timers[partido_id] = t
         t.start()
     log.info("Refresh programado en %.1fs para partido %d", delay, partido_id)
 
 
-def _refresh_lista(partido_id: int, fecha_partido: date) -> None:
+def _refresh_lista(partido_id: int) -> None:
     with _timers_lock:
         _timers.pop(partido_id, None)
 
     partido = database.get_partido_by_id(partido_id)
     lista_message_id = partido["lista_message_id"] if partido else None
+    titulares = (partido["titulares"] or REOPEN_PLAYERS) if partido else REOPEN_PLAYERS
+    question = (partido["question"] or "") if partido else ""
 
-    votos = database.get_votos(partido_id)
-    texto = _build_lista(votos, fecha_partido)
+    si = database.get_votos_si(partido_id)
+    no = database.get_votos_no(partido_id)
+    texto = _build_lista(si, no, titulares, question)
 
     if lista_message_id:
         try:
@@ -302,7 +312,6 @@ def _refresh_lista(partido_id: int, fecha_partido: date) -> None:
     new_id = client.send_text(GROUP_JID, texto)
     database.set_lista_message_id(partido_id, new_id)
 
-    confirmados = len(votos["SI"])
-    if REOPEN_MODE == "players" and confirmados >= REOPEN_PLAYERS:
+    if REOPEN_MODE == "players" and len(si) >= titulares:
         client.set_group_announcement(GROUP_JID, announcement=False)
-        log.info("Grupo reabierto: %d confirmados", confirmados)
+        log.info("Grupo reabierto: %d confirmados", len(si))
