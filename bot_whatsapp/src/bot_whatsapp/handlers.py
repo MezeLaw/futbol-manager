@@ -250,8 +250,24 @@ def _handle_command(msg: dict) -> None:
         reply = f"✓ {loaded} jugadores cargados."
         if errors:
             reply += "\n⚠ Errores:\n" + "\n".join(errors)
+
+        # Sincronizar LIDs desde Evolution
+        lid_updated = 0
+        try:
+            participants = client.get_group_participants(GROUP_JID)
+            for p in participants:
+                lid = p.get("id", "")
+                phone_jid = p.get("phoneNumber", "")
+                if lid.endswith("@lid") and phone_jid.endswith("@s.whatsapp.net"):
+                    database.upsert_jugador_lid(phone_jid, lid)
+                    lid_updated += 1
+            reply += f"\n✓ {lid_updated} LIDs sincronizados."
+        except Exception as e:
+            log.warning("No se pudieron sincronizar LIDs: %s", e)
+            reply += "\n⚠ LIDs no sincronizados."
+
         client.send_text(remote_jid, reply)
-        log.info("CSV cargado: %d jugadores, %d errores", loaded, len(errors))
+        log.info("CSV cargado: %d jugadores, %d errores, %d LIDs", loaded, len(errors), lid_updated)
     elif text.startswith("!setscore"):
         m = msg.get("message", {})
         mentioned = (

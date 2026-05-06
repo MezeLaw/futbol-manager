@@ -41,6 +41,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS jugadores (
                 jid TEXT PRIMARY KEY,
                 apodo TEXT NOT NULL,
+                lid TEXT UNIQUE,
                 fis REAL NOT NULL DEFAULT 5.0,
                 vel REAL NOT NULL DEFAULT 5.0,
                 pot REAL NOT NULL DEFAULT 5.0,
@@ -50,6 +51,11 @@ def init_db() -> None:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+        # Migración: jugadores v2 → v3 (agrega columna lid)
+        j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jugadores)").fetchall()}
+        if "lid" not in j_cols:
+            conn.execute("ALTER TABLE jugadores ADD COLUMN lid TEXT UNIQUE")
 
         # Migración: jugadores v1 (fis,tec,col,reg,arq) → v2 (fis,vel,pot,tec,col,arq)
         j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jugadores)").fetchall()}
@@ -245,9 +251,23 @@ def get_jugadores_by_jids(jids: list[str]) -> dict[str, sqlite3.Row]:
     placeholders = ",".join("?" * len(jids))
     with get_conn() as conn:
         rows = conn.execute(
-            f"SELECT * FROM jugadores WHERE jid IN ({placeholders})", jids
+            f"SELECT * FROM jugadores WHERE jid IN ({placeholders}) OR lid IN ({placeholders})",
+            jids + jids,
         ).fetchall()
-    return {r["jid"]: r for r in rows}
+    result: dict[str, sqlite3.Row] = {}
+    for r in rows:
+        result[r["jid"]] = r
+        if r["lid"]:
+            result[r["lid"]] = r
+    return result
+
+
+def upsert_jugador_lid(jid: str, lid: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jugadores SET lid = ? WHERE jid = ?",
+            (lid, jid),
+        )
 
 
 def get_jugador_by_apodo(apodo: str) -> sqlite3.Row | None:

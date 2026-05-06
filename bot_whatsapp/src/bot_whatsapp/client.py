@@ -65,3 +65,11 @@ def set_group_announcement(group_jid: str, announcement: bool) -> None:
 
 def phone_to_jid(phone: str) -> str:
     return phone.replace("+", "").replace(" ", "").replace("-", "") + "@s.whatsapp.net"
+
+
+def get_group_participants(group_jid: str) -> list[dict]:
+    """Retorna lista de participantes del grupo con id (@lid) y phoneNumber (@s.whatsapp.net)."""
+    with _client() as c:
+        r = c.get(f"/group/participants/{INSTANCE}", params={"groupJid": group_jid})
+        r.raise_for_status()
+    return r.json()
