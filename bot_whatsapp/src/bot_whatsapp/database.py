@@ -41,7 +41,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS jugadores (
                 jid TEXT PRIMARY KEY,
                 apodo TEXT NOT NULL,
-                lid TEXT UNIQUE,
+                lid TEXT,
                 fis REAL NOT NULL DEFAULT 5.0,
                 vel REAL NOT NULL DEFAULT 5.0,
                 pot REAL NOT NULL DEFAULT 5.0,
@@ -52,10 +52,13 @@ def init_db() -> None:
             );
         """)
 
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jugadores_lid ON jugadores(lid)")
+
         # Migración: jugadores v2 → v3 (agrega columna lid)
         j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jugadores)").fetchall()}
         if "lid" not in j_cols:
-            conn.execute("ALTER TABLE jugadores ADD COLUMN lid TEXT UNIQUE")
+            conn.execute("ALTER TABLE jugadores ADD COLUMN lid TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jugadores_lid ON jugadores(lid)")
 
         # Migración: jugadores v1 (fis,tec,col,reg,arq) → v2 (fis,vel,pot,tec,col,arq)
         j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jugadores)").fetchall()}
