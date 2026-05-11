@@ -2,6 +2,6 @@
 __pycache__/
 *.py[cod]
 .env
-data/
+data/*.db
 .DS_Store
 *.postman_collection.json

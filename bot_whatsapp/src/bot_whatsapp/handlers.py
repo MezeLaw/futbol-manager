@@ -1,3 +1,4 @@
+import csv
 import os
 import hmac as _hmac
 import hashlib
@@ -5,6 +6,7 @@ import logging
 import random
 import threading
 from datetime import date
+from itertools import combinations
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -17,6 +19,57 @@ REOPEN_MODE = os.environ.get("REOPEN_MODE", "players")
 REOPEN_PLAYERS = int(os.environ.get("REOPEN_PLAYERS", "12"))
 POLL_OPTIONS = ["SI", "NO"]
 _DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+
+_AREAS = ("fis", "vel", "pot", "tec", "col", "arq")
+_AREA_LABELS = ("Fis", "Vel", "Pot", "Tec", "Col", "Arq")
+# arquero pesa doble porque requiere un buen representante por equipo
+_AREA_WEIGHTS = (1.0, 1.0, 1.0, 1.0, 1.0, 2.0)
+
+_SETSCORE_HELP = (
+    "Uso: !setscore @jugador <Fis> <Vel> <Pot> <Tec> <Col> <Arq>\n"
+    "Ej:  !setscore @Martin 7.5 8 6 7 9 4\n"
+    "Rangos: 0.0 – 10.0 por área"
+)
+
+
+def _balance_teams(players: list[dict], half: int) -> tuple[list[dict], list[dict]]:
+    n = len(players)
+    indices = list(range(n))
+    best_teams: tuple[list[dict], list[dict]] | None = None
+    best_score = float("inf")
+
+    for combo in combinations(indices, half):
+        combo_set = set(combo)
+        a = [players[i] for i in combo]
+        b = [players[i] for i in indices if i not in combo_set]
+        score = sum(
+            w * (sum(p[area] for p in a) / half - sum(p[area] for p in b) / (n - half)) ** 2
+            for area, w in zip(_AREAS, _AREA_WEIGHTS)
+        )
+        if score < best_score:
+            best_score = score
+            best_teams = (a, b)
+
+    return best_teams  # type: ignore[return-value]
+
+
+def _format_equipos(team_a: list[dict], team_b: list[dict]) -> str:
+    def avg(team: list[dict], area: str) -> float:
+        return sum(p[area] for p in team) / len(team)
+
+    def prom_total(team: list[dict]) -> float:
+        return sum(avg(team, a) for a in _AREAS)
+
+    lines = ["⚽ *Equipos*\n"]
+    for label, team in (("A", team_a), ("B", team_b)):
+        stats = " | ".join(f"{lbl}:{avg(team, area):.1f}" for area, lbl in zip(_AREAS, _AREA_LABELS))
+        lines.append(f"*Equipo {label}* (prom: {prom_total(team):.1f})")
+        for i, p in enumerate(team, 1):
+            lines.append(f"  {i}. {p['name']}")
+        lines.append(f"  {stats}\n")
+
+    return "\n".join(lines)
 
 
 def _build_lista(si: list[tuple[str, str]], no: list[tuple[str, str]], titulares: int = REOPEN_PLAYERS, question: str = "") -> str:
@@ -176,6 +229,148 @@ def _handle_command(msg: dict) -> None:
     elif text == "!abrir":
         client.set_group_announcement(remote_jid, announcement=False)
         log.info("Grupo abierto por comando manual")
+    elif text == "!cargararchivo":
+        path = database.CSV_PATH
+        if not path.exists():
+            client.send_text(remote_jid, f"Archivo no encontrado: {path}\nCrealo en data/jugadores.csv")
+            return
+        loaded = 0
+        errors: list[str] = []
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader, 1):
+                try:
+                    jid = f"{row['numero'].strip()}@s.whatsapp.net"
+                    apodo = row["apodo"].strip()
+                    fis, vel, pot, tec, col, arq = (float(row[k]) for k in ("fis", "vel", "pot", "tec", "col", "arq"))
+                    database.upsert_jugador(jid, apodo, fis, vel, pot, tec, col, arq)
+                    loaded += 1
+                except (KeyError, ValueError) as e:
+                    errors.append(f"Fila {i}: {e}")
+        reply = f"✓ {loaded} jugadores cargados."
+        if errors:
+            reply += "\n⚠ Errores:\n" + "\n".join(errors)
+
+        # Sincronizar LIDs desde Evolution
+        lid_updated = 0
+        try:
+            participants = client.get_group_participants(GROUP_JID)
+            for p in participants:
+                lid = p.get("id", "")
+                phone_jid = p.get("phoneNumber", "")
+                if lid.endswith("@lid") and phone_jid.endswith("@s.whatsapp.net"):
+                    database.upsert_jugador_lid(phone_jid, lid)
+                    lid_updated += 1
+            reply += f"\n✓ {lid_updated} LIDs sincronizados."
+        except Exception as e:
+            log.warning("No se pudieron sincronizar LIDs: %s", e)
+            reply += "\n⚠ LIDs no sincronizados."
+
+        client.send_text(remote_jid, reply)
+        log.info("CSV cargado: %d jugadores, %d errores, %d LIDs", loaded, len(errors), lid_updated)
+    elif text.startswith("!setscore"):
+        m = msg.get("message", {})
+        mentioned = (
+            m.get("extendedTextMessage", {})
+            .get("contextInfo", {})
+            .get("mentionedJid", [])
+        )
+        args = raw_text[len("!setscore"):].strip().split()
+        if not mentioned or len(args) < 6:
+            client.send_text(remote_jid, _SETSCORE_HELP)
+            return
+        try:
+            fis, vel, pot, tec, col, arq = (float(x) for x in args[-6:])
+            for v in (fis, vel, pot, tec, col, arq):
+                if not (0.0 <= v <= 10.0):
+                    raise ValueError(f"Score fuera de rango: {v}")
+        except ValueError as e:
+            client.send_text(remote_jid, f"⚠ {e}\n{_SETSCORE_HELP}")
+            return
+        jid = mentioned[0]
+        existing = database.get_jugador_by_jid(jid)
+        apodo = existing["apodo"] if existing else jid.split("@")[0]
+        database.upsert_jugador(jid, apodo, fis, vel, pot, tec, col, arq)
+        client.send_text(
+            remote_jid,
+            f"✓ {apodo} → Fis:{fis} | Vel:{vel} | Pot:{pot} | Tec:{tec} | Col:{col} | Arq:{arq}",
+        )
+        log.info("Score actualizado: %s (%s)", apodo, jid)
+    elif text == "!jugadores":
+        jugadores = database.get_all_jugadores()
+        if not jugadores:
+            client.send_text(remote_jid, "No hay jugadores cargados. Usá !cargarArchivo.")
+            return
+        lines = [f"Plantel ({len(jugadores)} jugadores)\n"]
+        for j in jugadores:
+            total = j["fis"] + j["vel"] + j["pot"] + j["tec"] + j["col"] + j["arq"]
+            scores = f"Fis:{j['fis']} Vel:{j['vel']} Pot:{j['pot']} Tec:{j['tec']} Col:{j['col']} Arq:{j['arq']}"
+            lines.append(f"{j['apodo']:<14}{scores} | {total:.1f}")
+        client.send_text(remote_jid, "\n".join(lines))
+    elif text == "!equipos":
+        partido = database.get_latest_partido()
+        if not partido:
+            client.send_text(remote_jid, "No hay partido registrado.")
+            return
+        titulares_count = partido["titulares"] or REOPEN_PLAYERS
+        si = database.get_votos_si(partido["id"])
+        titulares = si[:titulares_count]
+        if len(titulares) < 2:
+            client.send_text(remote_jid, "No hay suficientes jugadores confirmados.")
+            return
+        half = len(titulares) // 2
+        jids = [jid for jid, _ in titulares]
+        scores_map = database.get_jugadores_by_jids(jids)
+        players = [
+            {
+                "jid": jid,
+                # pushName → apodo en DB → número de teléfono
+                "name": (
+                    name if name != jid.split("@")[0]
+                    else (scores_map[jid]["apodo"] if jid in scores_map else name)
+                ),
+                **({k: scores_map[jid][k] for k in _AREAS} if jid in scores_map else {k: 5.0 for k in _AREAS}),
+            }
+            for jid, name in titulares
+        ]
+        team_a, team_b = _balance_teams(players, half)
+        client.send_text(remote_jid, _format_equipos(team_a, team_b))
+        log.info("Equipos generados: %d vs %d", len(team_a), len(team_b))
+    elif text.startswith("!agregar"):
+        apodo = raw_text[len("!agregar"):].strip()
+        if not apodo:
+            client.send_text(remote_jid, "Uso: !agregar <apodo>")
+            return
+        partido = database.get_latest_partido()
+        if not partido:
+            client.send_text(remote_jid, "No hay partido registrado.")
+            return
+        jugador = database.get_jugador_by_apodo(apodo)
+        jid = jugador["jid"] if jugador else f"manual:{apodo.lower()}"
+        nombre = jugador["apodo"] if jugador else apodo
+        database.upsert_voto(partido["id"], jid, "SI", nombre)
+        _schedule_refresh(partido["id"])
+        client.send_text(remote_jid, f"✓ {nombre} agregado a la lista.")
+        log.info("Jugador agregado manualmente: %s (%s)", nombre, jid)
+    elif text.startswith("!eliminar"):
+        apodo = raw_text[len("!eliminar"):].strip()
+        if not apodo:
+            client.send_text(remote_jid, "Uso: !eliminar <apodo>")
+            return
+        partido = database.get_latest_partido()
+        if not partido:
+            client.send_text(remote_jid, "No hay partido registrado.")
+            return
+        jugador = database.get_jugador_by_apodo(apodo)
+        jid = jugador["jid"] if jugador else f"manual:{apodo.lower()}"
+        nombre = jugador["apodo"] if jugador else apodo
+        eliminado = database.delete_voto(partido["id"], jid)
+        if eliminado:
+            _schedule_refresh(partido["id"])
+            client.send_text(remote_jid, f"✓ {nombre} eliminado de la lista.")
+            log.info("Jugador eliminado manualmente: %s (%s)", nombre, jid)
+        else:
+            client.send_text(remote_jid, f"⚠ {nombre} no estaba en la lista del partido actual.")
 
 
 def _handle_poll_vote(msg: dict) -> None:

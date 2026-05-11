@@ -3,6 +3,7 @@ from pathlib import Path
 from datetime import date
 
 DB_PATH = Path(__file__).parent.parent.parent.parent / "data" / "futbol.db"
+CSV_PATH = DB_PATH.parent / "jugadores.csv"
 
 
 def get_conn() -> sqlite3.Connection:
@@ -36,7 +37,47 @@ def init_db() -> None:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(partido_id, player_jid)
             );
+
+            CREATE TABLE IF NOT EXISTS jugadores (
+                jid TEXT PRIMARY KEY,
+                apodo TEXT NOT NULL,
+                lid TEXT,
+                fis REAL NOT NULL DEFAULT 5.0,
+                vel REAL NOT NULL DEFAULT 5.0,
+                pot REAL NOT NULL DEFAULT 5.0,
+                tec REAL NOT NULL DEFAULT 5.0,
+                col REAL NOT NULL DEFAULT 5.0,
+                arq REAL NOT NULL DEFAULT 5.0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
+
+        # Migración: jugadores v2 → v3 (agrega columna lid)
+        j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jugadores)").fetchall()}
+        if "lid" not in j_cols:
+            conn.execute("ALTER TABLE jugadores ADD COLUMN lid TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jugadores_lid ON jugadores(lid)")
+
+        # Migración: jugadores v1 (fis,tec,col,reg,arq) → v2 (fis,vel,pot,tec,col,arq)
+        j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jugadores)").fetchall()}
+        if "reg" in j_cols and "vel" not in j_cols:
+            conn.executescript("""
+                CREATE TABLE jugadores_new (
+                    jid TEXT PRIMARY KEY,
+                    apodo TEXT NOT NULL,
+                    fis REAL NOT NULL DEFAULT 5.0,
+                    vel REAL NOT NULL DEFAULT 5.0,
+                    pot REAL NOT NULL DEFAULT 5.0,
+                    tec REAL NOT NULL DEFAULT 5.0,
+                    col REAL NOT NULL DEFAULT 5.0,
+                    arq REAL NOT NULL DEFAULT 5.0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO jugadores_new (jid, apodo, fis, tec, col, arq, updated_at)
+                    SELECT jid, apodo, fis, tec, col, arq, updated_at FROM jugadores;
+                DROP TABLE jugadores;
+                ALTER TABLE jugadores_new RENAME TO jugadores;
+            """)
 
         # Migración: eliminar UNIQUE en partidos.fecha (esquema viejo)
         row = conn.execute(
@@ -169,3 +210,78 @@ def get_partidos() -> list[sqlite3.Row]:
         return conn.execute(
             "SELECT * FROM partidos ORDER BY id DESC LIMIT 10"
         ).fetchall()
+
+
+def upsert_jugador(jid: str, apodo: str, fis: float, vel: float, pot: float, tec: float, col: float, arq: float) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO jugadores (jid, apodo, fis, vel, pot, tec, col, arq)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(jid) DO UPDATE SET
+                apodo = excluded.apodo,
+                fis = excluded.fis,
+                vel = excluded.vel,
+                pot = excluded.pot,
+                tec = excluded.tec,
+                col = excluded.col,
+                arq = excluded.arq,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (jid, apodo, fis, vel, pot, tec, col, arq),
+        )
+
+
+def get_jugador_by_jid(jid: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM jugadores WHERE jid = ?", (jid,)
+        ).fetchone()
+
+
+def get_all_jugadores() -> list[sqlite3.Row]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM jugadores ORDER BY apodo COLLATE NOCASE"
+        ).fetchall()
+
+
+def get_jugadores_by_jids(jids: list[str]) -> dict[str, sqlite3.Row]:
+    if not jids:
+        return {}
+    placeholders = ",".join("?" * len(jids))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM jugadores WHERE jid IN ({placeholders}) OR lid IN ({placeholders})",
+            jids + jids,
+        ).fetchall()
+    result: dict[str, sqlite3.Row] = {}
+    for r in rows:
+        result[r["jid"]] = r
+        if r["lid"]:
+            result[r["lid"]] = r
+    return result
+
+
+def upsert_jugador_lid(jid: str, lid: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE jugadores SET lid = ? WHERE jid = ?",
+            (lid, jid),
+        )
+
+
+def get_jugador_by_apodo(apodo: str) -> sqlite3.Row | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM jugadores WHERE apodo = ? COLLATE NOCASE", (apodo,)
+        ).fetchone()
+
+
+def delete_voto(partido_id: int, jid: str) -> bool:
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM votos WHERE partido_id = ? AND player_jid = ?",
+            (partido_id, jid),
+        )
+    return cursor.rowcount > 0
